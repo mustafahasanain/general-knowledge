@@ -16,7 +16,8 @@ def load_channel_ids():
 
 CHANNEL_IDS = load_channel_ids()
 
-youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY, credentials=None)
+# Remove credentials=None because it is not a valid argument
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
 def get_yesterday_videos(channel_id):
     now = datetime.now(timezone.utc)
@@ -27,8 +28,8 @@ def get_yesterday_videos(channel_id):
     request = youtube.search().list(
         part='snippet',
         channelId=channel_id,
-        publishedAfter=yesterday_start.isoformat(),
-        publishedBefore=yesterday_end.isoformat(),
+        publishedAfter=yesterday_start.isoformat() + "Z",  # Add 'Z' to indicate UTC time per YouTube API spec
+        publishedBefore=yesterday_end.isoformat() + "Z",
         maxResults=10,
         order='date',
         type='video'
@@ -58,7 +59,11 @@ def add_to_notion(video):
         }
     }
     response = requests.post(url, json=data, headers=headers)
-    return response.status_code == 200
+    if response.status_code == 200:
+        return True
+    else:
+        print("Notion API Error:", response.status_code, response.text)
+        return False
 
 def main():
     for channel_id in CHANNEL_IDS:
