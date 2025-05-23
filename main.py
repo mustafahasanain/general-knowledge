@@ -48,9 +48,9 @@ def get_last_48h_videos(youtube_service, channel_id):
     forty_eight_hours_ago = now - timedelta(hours=48)
 
     # Calculate start time for the last 48 hours in UTC
-    # Ensure ISO format includes 'Z' for UTC timezone for YouTube API compatibility
-    start_time = forty_eight_hours_ago.isoformat(timespec='microseconds') + 'Z'
-    end_time = now.isoformat(timespec='microseconds') + 'Z'
+    # Format timestamps for YouTube API compatibility (RFC 3339 format with Z suffix)
+    start_time = forty_eight_hours_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
+    end_time = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
     try:
         # Make the YouTube Data API search request
