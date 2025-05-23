@@ -32,9 +32,9 @@ def load_channel_ids():
 # Load channel IDs globally when the script starts
 CHANNEL_IDS = load_channel_ids()
 
-def get_last_24h_videos(youtube_service, channel_id):
+def get_last_48h_videos(youtube_service, channel_id):
     """
-    Fetches videos published in the last 24 hours for a given YouTube channel ID.
+    Fetches videos published in the last 48 hours for a given YouTube channel ID.
 
     Args:
         youtube_service: An initialized YouTube API client object.
@@ -45,11 +45,11 @@ def get_last_24h_videos(youtube_service, channel_id):
               Returns an empty list if an error occurs or no videos are found.
     """
     now = datetime.now(timezone.utc)
-    twenty_four_hours_ago = now - timedelta(hours=24)
+    forty_eight_hours_ago = now - timedelta(hours=48)
 
-    # Calculate start time (24 hours ago) and current time in UTC
+    # Calculate start time for the last 48 hours in UTC
     # Ensure ISO format includes 'Z' for UTC timezone for YouTube API compatibility
-    start_time = twenty_four_hours_ago.isoformat(timespec='microseconds') + 'Z'
+    start_time = forty_eight_hours_ago.isoformat(timespec='microseconds') + 'Z'
     end_time = now.isoformat(timespec='microseconds') + 'Z'
 
     try:
@@ -57,9 +57,9 @@ def get_last_24h_videos(youtube_service, channel_id):
         request = youtube_service.search().list(
             part='snippet',          # Request snippet details for each video
             channelId=channel_id,    # Filter by channel ID
-            publishedAfter=start_time, # Videos published after this time (24 hours ago)
+            publishedAfter=start_time, # Videos published after this time (48 hours ago)
             publishedBefore=end_time,  # Videos published before this time (now)
-            maxResults=10,           # Maximum number of results to return
+            maxResults=50,           # Increased to capture more videos in 48h period
             order='date',            # Order results by date
             type='video'             # Only return video results (not channels or playlists)
         )
@@ -154,17 +154,17 @@ def main():
     # Iterate through each channel ID
     for channel_id in CHANNEL_IDS:
         print(f"\n--- Processing channel: {channel_id} ---")
-        # Get videos published in the last 24 hours for the current channel
-        videos = get_last_24h_videos(youtube_service, channel_id)
+        # Get videos published in the last 48 hours for the current channel
+        videos = get_last_48h_videos(youtube_service, channel_id)
 
         if videos:
-            print(f"Found {len(videos)} videos for channel {channel_id} published in the last 24 hours. Adding to Notion...")
+            print(f"Found {len(videos)} videos for channel {channel_id} published in the last 48 hours. Adding to Notion...")
             # Add each found video to Notion
             for video in videos:
                 success = add_to_notion(video)
                 print(f"{'✅ Added' if success else '❌ Failed'}: {video['title']}")
         else:
-            print(f"No videos found for channel {channel_id} in the last 24 hours or an error occurred.")
+            print(f"No videos found for channel {channel_id} in the last 48 hours or an error occurred.")
 
 if __name__ == "__main__":
     main()
