@@ -4,7 +4,8 @@ import requests
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError # Import for handling HTTP errors from Google APIs
+from googleapiclient.errors import HttpError
+import re
 
 # Load environment variables from .env file
 load_dotenv()
@@ -32,122 +33,220 @@ def load_channel_ids():
 # Load channel IDs globally when the script starts
 CHANNEL_IDS = load_channel_ids()
 
-def get_last_48h_videos(youtube_service, channel_id):
+def get_existing_video_ids():
     """
-    Fetches videos published in the last 48 hours for a given YouTube channel ID.
+    Retrieves all existing video IDs from the Notion database to prevent duplicates.
+    
+    Returns:
+        set: A set of existing video IDs from URLs in the database.
+    """
+    existing_ids = set()
+    has_more = True
+    next_cursor = None
+    
+    while has_more:
+        url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
+        headers = {
+            "Authorization": f"Bearer {NOTION_TOKEN}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2022-06-28"
+        }
+        
+        payload = {"page_size": 100}  # Maximum page size for efficiency
+        if next_cursor:
+            payload["start_cursor"] = next_cursor
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Extract video IDs from URLs
+            for page in data.get('results', []):
+                url_property = page.get('properties', {}).get('URL', {})
+                if url_property.get('type') == 'url' and url_property.get('url'):
+                    video_url = url_property['url']
+                    # Extract video ID from YouTube URL
+                    video_id_match = re.search(r'(?:v=|/)([a-zA-Z0-9_-]{11})', video_url)
+                    if video_id_match:
+                        existing_ids.add(video_id_match.group(1))
+            
+            has_more = data.get('has_more', False)
+            next_cursor = data.get('next_cursor')
+            
+        except Exception as e:
+            print(f"Error retrieving existing videos: {e}")
+            break
+    
+    print(f"Found {len(existing_ids)} existing videos in database")
+    return existing_ids
+
+def parse_duration(duration_str):
+    """
+    Parses YouTube's ISO 8601 duration format (PT#M#S) to seconds.
+    
+    Args:
+        duration_str (str): Duration in ISO 8601 format (e.g., "PT5M30S", "PT1H2M3S")
+    
+    Returns:
+        int: Duration in seconds, or 0 if parsing fails
+    """
+    if not duration_str:
+        return 0
+    
+    # Parse ISO 8601 duration format
+    pattern = r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?'
+    match = re.match(pattern, duration_str)
+    
+    if not match:
+        return 0
+    
+    hours, minutes, seconds = match.groups()
+    total_seconds = 0
+    
+    if hours:
+        total_seconds += int(hours) * 3600
+    if minutes:
+        total_seconds += int(minutes) * 60
+    if seconds:
+        total_seconds += int(seconds)
+    
+    return total_seconds
+
+def get_last_48h_videos_with_duration(youtube_service, channel_id, existing_video_ids):
+    """
+    Fetches videos published in the last 48 hours for a given YouTube channel ID,
+    filters by duration (>5 minutes), and excludes existing videos.
 
     Args:
         youtube_service: An initialized YouTube API client object.
         channel_id (str): The ID of the YouTube channel.
+        existing_video_ids (set): Set of existing video IDs to avoid duplicates.
 
     Returns:
-        list: A list of dictionaries, each containing video details (title, video_id, channel_title, published_at).
-              Returns an empty list if an error occurs or no videos are found.
+        list: A list of dictionaries containing video details for videos >5 minutes.
     """
     now = datetime.now(timezone.utc)
     forty_eight_hours_ago = now - timedelta(hours=48)
 
-    # Calculate start time for the last 48 hours in UTC
-    # Format timestamps for YouTube API compatibility (RFC 3339 format with Z suffix)
+    # Format timestamps for YouTube API compatibility
     start_time = forty_eight_hours_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
     try:
-        # Make the YouTube Data API search request
-        request = youtube_service.search().list(
-            part='snippet',          # Request snippet details for each video
-            channelId=channel_id,    # Filter by channel ID
-            publishedAfter=start_time, # Videos published after this time (48 hours ago)
-            publishedBefore=end_time,  # Videos published before this time (now)
-            maxResults=50,           # Increased to capture more videos in 48h period
-            order='date',            # Order results by date
-            type='video'             # Only return video results (not channels or playlists)
+        # Step 1: Get video list from search API
+        search_request = youtube_service.search().list(
+            part='snippet',
+            channelId=channel_id,
+            publishedAfter=start_time,
+            publishedBefore=end_time,
+            maxResults=50,
+            order='date',
+            type='video'
         )
-        response = request.execute() # Execute the API request
-
-        # Extract relevant video information from the API response
-        return [{
-            'title': item['snippet']['title'],
-            'video_id': item['id']['videoId'],
-            'channel_title': item['snippet']['channelTitle'],
-            'published_at': item['snippet']['publishedAt']
-        } for item in response.get('items', []) if 'videoId' in item['id']] # Ensure videoId exists
+        search_response = search_request.execute()
+        
+        # Filter out existing videos and extract video IDs
+        new_video_ids = []
+        video_snippets = {}
+        
+        for item in search_response.get('items', []):
+            if 'videoId' in item['id']:
+                video_id = item['id']['videoId']
+                if video_id not in existing_video_ids:
+                    new_video_ids.append(video_id)
+                    video_snippets[video_id] = item['snippet']
+        
+        if not new_video_ids:
+            print(f"No new videos found for channel {channel_id}")
+            return []
+        
+        print(f"Found {len(new_video_ids)} new videos, checking durations...")
+        
+        # Step 2: Get video details including duration (batch request for efficiency)
+        videos_request = youtube_service.videos().list(
+            part='contentDetails',
+            id=','.join(new_video_ids)  # Batch request for up to 50 videos
+        )
+        videos_response = videos_request.execute()
+        
+        # Step 3: Filter by duration and prepare final list
+        valid_videos = []
+        for video in videos_response.get('items', []):
+            video_id = video['id']
+            duration_str = video.get('contentDetails', {}).get('duration', '')
+            duration_seconds = parse_duration(duration_str)
+            
+            # Only include videos longer than 5 minutes (300 seconds)
+            if duration_seconds > 300:
+                snippet = video_snippets.get(video_id, {})
+                valid_videos.append({
+                    'title': snippet.get('title', ''),
+                    'video_id': video_id,
+                    'channel_title': snippet.get('channelTitle', ''),
+                    'published_at': snippet.get('publishedAt', ''),
+                    'duration_seconds': duration_seconds
+                })
+        
+        print(f"Found {len(valid_videos)} videos longer than 5 minutes")
+        return valid_videos
+        
     except HttpError as e:
-        # Handle errors specific to Google API calls (e.g., invalid API key, rate limits)
         print(f"Error fetching videos for channel {channel_id}: {e}")
         return []
     except Exception as e:
-        # Handle any other unexpected errors
         print(f"An unexpected error occurred while fetching videos for channel {channel_id}: {e}")
         return []
 
-def get_database_properties():
+def add_videos_to_notion_batch(videos):
     """
-    Retrieves the properties of the Notion database to help with debugging.
+    Adds multiple videos to Notion database efficiently.
     
-    Returns:
-        dict: Database properties or None if error occurs.
-    """
-    url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}"
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": "2022-06-28"
-    }
-    
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        return response.json().get('properties', {})
-    except Exception as e:
-        print(f"Error retrieving database properties: {e}")
-        return None
-
-def add_to_notion(video):
-    """
-    Adds a video entry to a Notion database.
-
     Args:
-        video (dict): A dictionary containing video details (title, video_id, channel_title, published_at).
-
+        videos (list): List of video dictionaries to add.
+    
     Returns:
-        bool: True if the video was successfully added to Notion, False otherwise.
+        tuple: (success_count, failed_count)
     """
-    url = "https://api.notion.com/v1/pages"
-    headers = {
+    if not videos:
+        return 0, 0
+    
+    success_count = 0
+    failed_count = 0
+    
+    # Process videos individually (Notion doesn't support true batch creation)
+    # But we optimize by reusing the session and preparing data efficiently
+    session = requests.Session()
+    session.headers.update({
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28" # Specify the Notion API version
-    }
-
-    # Construct the payload for the Notion API request
-    data = {
-        "parent": { "database_id": NOTION_DB_ID },
-        "properties": {
-            "Title": { "title": [{ "text": { "content": video['title'] } }] },
-            # Use "URL" property name to match your database schema
-            "URL": { "url": f"https://www.youtube.com/watch?v={video['video_id']}" },
-            # Use "rich_text" type for Channel property (text type in Notion)
-            "Channel": { "rich_text": [{ "text": { "content": video['channel_title'] } }] },
-            "Date": { "date": { "start": video['published_at'] } }
+        "Notion-Version": "2022-06-28"
+    })
+    
+    url = "https://api.notion.com/v1/pages"
+    
+    for video in videos:
+        data = {
+            "parent": {"database_id": NOTION_DB_ID},
+            "properties": {
+                "Title": {"title": [{"text": {"content": video['title']}}]},
+                "URL": {"url": f"https://www.youtube.com/watch?v={video['video_id']}"},
+                "Channel": {"rich_text": [{"text": {"content": video['channel_title']}}]},
+                "Date": {"date": {"start": video['published_at']}}
+            }
         }
-    }
-
-    try:
-        # Send the POST request to the Notion API
-        response = requests.post(url, json=data, headers=headers)
-        response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
-        return True
-    except requests.exceptions.RequestException as e:
-        # Handle errors related to the HTTP request (e.g., network issues, invalid URL)
-        print(f"Error adding video '{video['title']}' to Notion: {e}")
-        if 'response' in locals(): # Check if response object exists
-            print(f"Notion API response status code: {response.status_code}")
-            print(f"Notion API response body: {response.text}")
-        return False
-    except Exception as e:
-        # Handle any other unexpected errors
-        print(f"An unexpected error occurred while adding video '{video['title']}' to Notion: {e}")
-        return False
+        
+        try:
+            response = session.post(url, json=data)
+            response.raise_for_status()
+            success_count += 1
+            print(f"✅ Added: {video['title'][:50]}..." if len(video['title']) > 50 else f"✅ Added: {video['title']}")
+        except requests.exceptions.RequestException as e:
+            failed_count += 1
+            print(f"❌ Failed: {video['title'][:50]}..." if len(video['title']) > 50 else f"❌ Failed: {video['title']}")
+            print(f"   Error: {e}")
+    
+    return success_count, failed_count
 
 def main():
     """
@@ -165,7 +264,6 @@ def main():
         return
 
     # Initialize the YouTube API service
-    # The 'build' function handles downloading the discovery document internally if needed.
     youtube_service = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
     # Check if any channel IDs were loaded
@@ -173,31 +271,35 @@ def main():
         print("No channel IDs loaded. Please ensure 'channels.txt' exists and contains channel IDs.")
         return
 
-    # Debug: Check database properties
-    print("Checking Notion database properties...")
-    db_properties = get_database_properties()
-    if db_properties:
-        print("Available database properties:")
-        for prop_name, prop_info in db_properties.items():
-            print(f"  - {prop_name}: {prop_info.get('type', 'unknown type')}")
-    else:
-        print("Could not retrieve database properties. Check your NOTION_TOKEN and NOTION_DB_ID.")
-        return
+    # Get existing video IDs to prevent duplicates
+    print("Retrieving existing videos from Notion database...")
+    existing_video_ids = get_existing_video_ids()
 
-    # Iterate through each channel ID
+    total_success = 0
+    total_failed = 0
+
+    # Process each channel
     for channel_id in CHANNEL_IDS:
         print(f"\n--- Processing channel: {channel_id} ---")
-        # Get videos published in the last 48 hours for the current channel
-        videos = get_last_48h_videos(youtube_service, channel_id)
+        
+        # Get new videos (>5 minutes, not in database)
+        videos = get_last_48h_videos_with_duration(youtube_service, channel_id, existing_video_ids)
 
         if videos:
-            print(f"Found {len(videos)} videos for channel {channel_id} published in the last 48 hours. Adding to Notion...")
-            # Add each found video to Notion
+            print(f"Adding {len(videos)} new videos to Notion...")
+            success, failed = add_videos_to_notion_batch(videos)
+            total_success += success
+            total_failed += failed
+            
+            # Add new video IDs to existing set to prevent duplicates across channels
             for video in videos:
-                success = add_to_notion(video)
-                print(f"{'✅ Added' if success else '❌ Failed'}: {video['title']}")
+                existing_video_ids.add(video['video_id'])
         else:
-            print(f"No videos found for channel {channel_id} in the last 48 hours or an error occurred.")
+            print(f"No new videos >5 minutes found for channel {channel_id}")
+
+    print(f"\n=== Summary ===")
+    print(f"✅ Successfully added: {total_success} videos")
+    print(f"❌ Failed to add: {total_failed} videos")
 
 if __name__ == "__main__":
     main()
