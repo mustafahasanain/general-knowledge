@@ -26,7 +26,7 @@ jobs:
           # pip install python-dotenv google-api-python-client requests
 
       - name: Run Python script
-        run: python your_script_name.py # Replace 'your_script_name.py' with your actual script file name
+        run: python main.py
         env:
           # Pass GitHub Secrets as environment variables to the script
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
