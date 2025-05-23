@@ -113,9 +113,9 @@ def parse_duration(duration_str):
     
     return total_seconds
 
-def get_last_48h_videos_with_duration(youtube_service, channel_id, existing_video_ids):
+def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_video_ids):
     """
-    Fetches videos published in the last 48 hours for a given YouTube channel ID,
+    Fetches videos published in the last 24 hours for a given YouTube channel ID,
     filters by duration (>5 minutes), and excludes existing videos.
 
     Args:
@@ -127,10 +127,10 @@ def get_last_48h_videos_with_duration(youtube_service, channel_id, existing_vide
         list: A list of dictionaries containing video details for videos >5 minutes.
     """
     now = datetime.now(timezone.utc)
-    forty_eight_hours_ago = now - timedelta(hours=48)
+    twenty_four_hours_ago = now - timedelta(hours=24)
 
     # Format timestamps for YouTube API compatibility
-    start_time = forty_eight_hours_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
+    start_time = twenty_four_hours_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time = now.strftime('%Y-%m-%dT%H:%M:%SZ')
 
     try:
@@ -283,7 +283,7 @@ def main():
         print(f"\n--- Processing channel: {channel_id} ---")
         
         # Get new videos (>5 minutes, not in database)
-        videos = get_last_48h_videos_with_duration(youtube_service, channel_id, existing_video_ids)
+        videos = get_last_24h_videos_with_duration(youtube_service, channel_id, existing_video_ids)
 
         if videos:
             print(f"Adding {len(videos)} new videos to Notion...")
@@ -295,7 +295,7 @@ def main():
             for video in videos:
                 existing_video_ids.add(video['video_id'])
         else:
-            print(f"No new videos >5 minutes found for channel {channel_id}")
+            print(f"No new videos >5 minutes found for channel {channel_id} in the last 24 hours")
 
     print(f"\n=== Summary ===")
     print(f"✅ Successfully added: {total_success} videos")
