@@ -16,7 +16,7 @@ def load_channel_ids():
 
 CHANNEL_IDS = load_channel_ids()
 
-youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY, credentials=None)
 
 def get_yesterday_videos(channel_id):
     now = datetime.now(timezone.utc)
