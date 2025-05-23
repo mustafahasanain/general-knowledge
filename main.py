@@ -1,5 +1,6 @@
 import os
 from googleapiclient.discovery import build
+from googleapiclient.discovery_cache.base import Cache
 from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
@@ -16,8 +17,15 @@ def load_channel_ids():
 
 CHANNEL_IDS = load_channel_ids()
 
+# Disable discovery document caching (for environments like GitHub Actions or Replit)
+class NoCache(Cache):
+    def get(self, url):
+        return None
+    def set(self, url, content):
+        pass
+
 # Remove credentials=None because it is not a valid argument
-youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY, cache=NoCache())
 
 def get_yesterday_videos(channel_id):
     now = datetime.now(timezone.utc)
