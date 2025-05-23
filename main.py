@@ -31,12 +31,9 @@ if not os.path.exists("youtube-v3-discovery.json"):
         json.dump(res.json(), f)
     print("✅ youtube-v3-discovery.json saved.")
 
-# Load the discovery document
-with open("youtube-v3-discovery.json", "r") as f:
-    doc = json.load(f)
+from googleapiclient.discovery import build
 
-# Build the YouTube service using API key and static discovery
-youtube = build_from_document(doc, developerKey=YOUTUBE_API_KEY)
+youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
 def get_yesterday_videos(channel_id):
     now = datetime.now(timezone.utc)
