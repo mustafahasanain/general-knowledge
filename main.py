@@ -1,6 +1,6 @@
 import os
-from googleapiclient.discovery import build
-from googleapiclient.discovery_cache.base import Cache
+import json
+from googleapiclient.discovery import build_from_document
 from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
@@ -17,15 +17,12 @@ def load_channel_ids():
 
 CHANNEL_IDS = load_channel_ids()
 
-# Disable discovery document caching (for environments like GitHub Actions or Replit)
-class NoCache(Cache):
-    def get(self, url):
-        return None
-    def set(self, url, content):
-        pass
+# Load the discovery document
+with open("youtube-v3-discovery.json", "r") as f:
+    doc = json.load(f)
 
-# Remove credentials=None because it is not a valid argument
-youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY, cache=NoCache())
+# Build the YouTube service using API key and static discovery
+youtube = build_from_document(doc, developerKey=YOUTUBE_API_KEY)
 
 def get_yesterday_videos(channel_id):
     now = datetime.now(timezone.utc)
@@ -36,14 +33,14 @@ def get_yesterday_videos(channel_id):
     request = youtube.search().list(
         part='snippet',
         channelId=channel_id,
-        publishedAfter=yesterday_start.isoformat() + "Z",  # Add 'Z' to indicate UTC time per YouTube API spec
-        publishedBefore=yesterday_end.isoformat() + "Z",
+        publishedAfter=yesterday_start.isoformat(),
+        publishedBefore=yesterday_end.isoformat(),
         maxResults=10,
         order='date',
         type='video'
     )
     response = request.execute()
-    return [{
+    return [ {
         'title': item['snippet']['title'],
         'video_id': item['id']['videoId'],
         'channel_title': item['snippet']['channelTitle'],
@@ -67,21 +64,14 @@ def add_to_notion(video):
         }
     }
     response = requests.post(url, json=data, headers=headers)
-    if response.status_code == 200:
-        return True
-    else:
-        print("Notion API Error:", response.status_code, response.text)
-        return False
+    return response.status_code == 200
 
 def main():
     for channel_id in CHANNEL_IDS:
         videos = get_yesterday_videos(channel_id)
         for video in videos:
             success = add_to_notion(video)
-            if success:
-                print(f"Added: {video['title']}")
-            else:
-                print(f"Failed: {video['title']}")
+            print(f"{'✅ Added' if success else '❌ Failed'}: {video['title']}")
 
 if __name__ == "__main__":
     main()
