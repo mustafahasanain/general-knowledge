@@ -81,6 +81,27 @@ def get_last_48h_videos(youtube_service, channel_id):
         print(f"An unexpected error occurred while fetching videos for channel {channel_id}: {e}")
         return []
 
+def get_database_properties():
+    """
+    Retrieves the properties of the Notion database to help with debugging.
+    
+    Returns:
+        dict: Database properties or None if error occurs.
+    """
+    url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}"
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json().get('properties', {})
+    except Exception as e:
+        print(f"Error retrieving database properties: {e}")
+        return None
+
 def add_to_notion(video):
     """
     Adds a video entry to a Notion database.
@@ -103,8 +124,9 @@ def add_to_notion(video):
         "parent": { "database_id": NOTION_DB_ID },
         "properties": {
             "Title": { "title": [{ "text": { "content": video['title'] } }] },
-            # CORRECTED: Use the standard YouTube video URL format
-            "Link": { "url": f"https://www.youtube.com/watch?v={video['video_id']}" },
+            # Use "URL" property name to match your database schema
+            "URL": { "url": f"https://www.youtube.com/watch?v={video['video_id']}" },
+            # Use "rich_text" type for Channel property (text type in Notion)
             "Channel": { "rich_text": [{ "text": { "content": video['channel_title'] } }] },
             "Date": { "date": { "start": video['published_at'] } }
         }
@@ -149,6 +171,17 @@ def main():
     # Check if any channel IDs were loaded
     if not CHANNEL_IDS:
         print("No channel IDs loaded. Please ensure 'channels.txt' exists and contains channel IDs.")
+        return
+
+    # Debug: Check database properties
+    print("Checking Notion database properties...")
+    db_properties = get_database_properties()
+    if db_properties:
+        print("Available database properties:")
+        for prop_name, prop_info in db_properties.items():
+            print(f"  - {prop_name}: {prop_info.get('type', 'unknown type')}")
+    else:
+        print("Could not retrieve database properties. Check your NOTION_TOKEN and NOTION_DB_ID.")
         return
 
     # Iterate through each channel ID
