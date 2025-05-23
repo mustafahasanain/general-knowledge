@@ -17,6 +17,20 @@ def load_channel_ids():
 
 CHANNEL_IDS = load_channel_ids()
 
+
+import os
+import json
+import requests
+
+# Ensure discovery document exists
+if not os.path.exists("youtube-v3-discovery.json"):
+    print("🔄 Downloading YouTube discovery document...")
+    url = "https://www.googleapis.com/discovery/v1/apis/youtube/v3/rest"
+    res = requests.get(url)
+    with open("youtube-v3-discovery.json", "w") as f:
+        json.dump(res.json(), f)
+    print("✅ youtube-v3-discovery.json saved.")
+
 # Load the discovery document
 with open("youtube-v3-discovery.json", "r") as f:
     doc = json.load(f)
