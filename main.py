@@ -113,6 +113,28 @@ def parse_duration(duration_str):
     
     return total_seconds
 
+def format_duration(seconds):
+    """
+    Converts duration in seconds to MM:SS or HH:MM:SS format.
+    
+    Args:
+        seconds (int): Duration in seconds
+    
+    Returns:
+        str: Formatted duration string (e.g., "12:14" or "1:05:30")
+    """
+    if seconds == 0:
+        return "0:00"
+    
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+    
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    else:
+        return f"{minutes}:{seconds:02d}"
+
 def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_video_ids):
     """
     Fetches videos published in the last 24 hours for a given YouTube channel ID,
@@ -185,7 +207,8 @@ def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_vide
                     'video_id': video_id,
                     'channel_title': snippet.get('channelTitle', ''),
                     'published_at': snippet.get('publishedAt', ''),
-                    'duration_seconds': duration_seconds
+                    'duration_seconds': duration_seconds,
+                    'duration_formatted': format_duration(duration_seconds)
                 })
         
         print(f"Found {len(valid_videos)} videos longer than 5 minutes")
@@ -232,7 +255,8 @@ def add_videos_to_notion_batch(videos):
                 "Title": {"title": [{"text": {"content": video['title']}}]},
                 "URL": {"url": f"https://www.youtube.com/watch?v={video['video_id']}"},
                 "Channel": {"rich_text": [{"text": {"content": video['channel_title']}}]},
-                "Date": {"date": {"start": video['published_at']}}
+                "Date": {"date": {"start": video['published_at']}},
+                "Length": {"rich_text": [{"text": {"content": video['duration_formatted']}}]}
             }
         }
         
@@ -240,7 +264,7 @@ def add_videos_to_notion_batch(videos):
             response = session.post(url, json=data)
             response.raise_for_status()
             success_count += 1
-            print(f"✅ Added: {video['title'][:50]}..." if len(video['title']) > 50 else f"✅ Added: {video['title']}")
+            print(f"✅ Added: {video['title'][:50]}... ({video['duration_formatted']})" if len(video['title']) > 50 else f"✅ Added: {video['title']} ({video['duration_formatted']})")
         except requests.exceptions.RequestException as e:
             failed_count += 1
             print(f"❌ Failed: {video['title'][:50]}..." if len(video['title']) > 50 else f"❌ Failed: {video['title']}")
