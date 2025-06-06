@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import re
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,7 +25,9 @@ def load_channel_ids():
     try:
         with open('channels.txt', 'r') as file:
             # Read each line, strip whitespace, and filter out empty lines
-            return [line.strip() for line in file if line.strip()]
+            channel_ids = [line.strip() for line in file if line.strip()]
+            print(f"DEBUG: Loaded {len(channel_ids)} channel IDs: {channel_ids}")
+            return channel_ids
     except FileNotFoundError:
         print("Error: 'channels.txt' not found. Please create this file in the same directory "
               "as the script and add YouTube channel IDs, one per line.")
@@ -40,6 +43,7 @@ def get_existing_video_ids():
     Returns:
         set: A set of existing video IDs from URLs in the database.
     """
+    print("DEBUG: Starting to fetch existing video IDs...")
     existing_ids = set()
     has_more = True
     next_cursor = None
@@ -57,9 +61,17 @@ def get_existing_video_ids():
             payload["start_cursor"] = next_cursor
         
         try:
+            print(f"DEBUG: Making request to Notion API...")
             response = requests.post(url, json=payload, headers=headers)
+            print(f"DEBUG: Notion API response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"DEBUG: Notion API error response: {response.text}")
+                
             response.raise_for_status()
             data = response.json()
+            
+            print(f"DEBUG: Found {len(data.get('results', []))} pages in this batch")
             
             # Extract video IDs from URLs
             for page in data.get('results', []):
@@ -76,6 +88,7 @@ def get_existing_video_ids():
             
         except Exception as e:
             print(f"Error retrieving existing videos: {e}")
+            print(f"DEBUG: Full error details: {type(e).__name__}: {str(e)}")
             break
     
     print(f"Found {len(existing_ids)} existing videos in database")
@@ -113,32 +126,27 @@ def parse_duration(duration_str):
     
     return total_seconds
 
-def format_duration(seconds):
+def calculate_duration_decimal(seconds):
     """
-    Converts duration in seconds to MM:SS or HH:MM:SS format.
+    Converts duration in seconds to decimal format (e.g., 14.75 for 14:45).
     
     Args:
         seconds (int): Duration in seconds
     
     Returns:
-        str: Formatted duration string (e.g., "12:14" or "1:05:30")
+        float: Duration as decimal number (minutes + seconds/60)
     """
     if seconds == 0:
-        return "0:00"
+        return 0.0
     
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    seconds = seconds % 60
-    
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
-    else:
-        return f"{minutes}:{seconds:02d}"
+    total_minutes = seconds / 60
+    return round(total_minutes, 2)
 
 def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_video_ids):
     """
     Fetches videos published in the last 24 hours for a given YouTube channel ID,
     filters by duration (>5 minutes), and excludes existing videos.
+    OPTIMIZED for lower API quota usage.
 
     Args:
         youtube_service: An initialized YouTube API client object.
@@ -154,30 +162,63 @@ def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_vide
     # Format timestamps for YouTube API compatibility
     start_time = twenty_four_hours_ago.strftime('%Y-%m-%dT%H:%M:%SZ')
     end_time = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+    
+    print(f"DEBUG: Searching for videos between {start_time} and {end_time}")
 
     try:
-        # Step 1: Get video list from search API
-        search_request = youtube_service.search().list(
-            part='snippet',
-            channelId=channel_id,
-            publishedAfter=start_time,
-            publishedBefore=end_time,
-            maxResults=50,
-            order='date',
-            type='video'
+        # OPTIMIZATION 1: Use playlistItems API instead of search API (lower quota cost)
+        # First get the channel's uploads playlist ID
+        print(f"DEBUG: Getting channel info for {channel_id}")
+        channel_request = youtube_service.channels().list(
+            part='contentDetails',
+            id=channel_id
         )
-        search_response = search_request.execute()
+        channel_response = channel_request.execute()
         
-        # Filter out existing videos and extract video IDs
+        if not channel_response.get('items'):
+            print(f"Channel {channel_id} not found")
+            return []
+            
+        uploads_playlist_id = channel_response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+        print(f"DEBUG: Found uploads playlist: {uploads_playlist_id}")
+        
+        # OPTIMIZATION 2: Get recent videos from uploads playlist (costs 1 unit vs 100 units for search)
+        # Reduce maxResults to minimize quota usage
+        playlist_request = youtube_service.playlistItems().list(
+            part='snippet',
+            playlistId=uploads_playlist_id,
+            maxResults=10,  # Reduced from 50 to 10 to save quota
+            order='date'
+        )
+        playlist_response = playlist_request.execute()
+        
+        print(f"DEBUG: Playlist returned {len(playlist_response.get('items', []))} recent videos")
+        
+        # Filter videos by date and exclude existing ones
         new_video_ids = []
         video_snippets = {}
         
-        for item in search_response.get('items', []):
-            if 'videoId' in item['id']:
-                video_id = item['id']['videoId']
+        for item in playlist_response.get('items', []):
+            video_id = item['snippet']['resourceId']['videoId']
+            published_at = item['snippet']['publishedAt']
+            video_title = item['snippet'].get('title', 'Unknown')
+            
+            # Parse the published date
+            published_date = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+            
+            # Check if video was published in the last 24 hours
+            if published_date >= twenty_four_hours_ago:
+                print(f"DEBUG: Found recent video: {video_title} (ID: {video_id})")
+                
                 if video_id not in existing_video_ids:
                     new_video_ids.append(video_id)
                     video_snippets[video_id] = item['snippet']
+                    print(f"DEBUG: Video is new, added to processing list")
+                else:
+                    print(f"DEBUG: Video already exists in database, skipping")
+            else:
+                print(f"DEBUG: Video is older than 24 hours, stopping search")
+                break  # Since videos are ordered by date, we can stop here
         
         if not new_video_ids:
             print(f"No new videos found for channel {channel_id}")
@@ -185,40 +226,56 @@ def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_vide
         
         print(f"Found {len(new_video_ids)} new videos, checking durations...")
         
-        # Step 2: Get video details including duration (batch request for efficiency)
+        # OPTIMIZATION 3: Process videos in smaller batches to avoid unnecessary API calls
+        # If no new videos, don't make the videos API call
+        if not new_video_ids:
+            return []
+        
+        # Get video details including duration (batch request for efficiency)
         videos_request = youtube_service.videos().list(
             part='contentDetails',
-            id=','.join(new_video_ids)  # Batch request for up to 50 videos
+            id=','.join(new_video_ids)  # Batch request
         )
         videos_response = videos_request.execute()
         
-        # Step 3: Filter by duration and prepare final list
+        print(f"DEBUG: Got duration details for {len(videos_response.get('items', []))} videos")
+        
+        # Filter by duration and prepare final list
         valid_videos = []
         for video in videos_response.get('items', []):
             video_id = video['id']
             duration_str = video.get('contentDetails', {}).get('duration', '')
             duration_seconds = parse_duration(duration_str)
             
+            snippet = video_snippets.get(video_id, {})
+            video_title = snippet.get('title', 'Unknown')
+            
+            print(f"DEBUG: Video '{video_title}' duration: {duration_str} ({duration_seconds} seconds)")
+            
             # Only include videos longer than 5 minutes (300 seconds)
             if duration_seconds > 300:
-                snippet = video_snippets.get(video_id, {})
+                print(f"DEBUG: Video is longer than 5 minutes, adding to final list")
                 valid_videos.append({
                     'title': snippet.get('title', ''),
                     'video_id': video_id,
                     'channel_title': snippet.get('channelTitle', ''),
                     'published_at': snippet.get('publishedAt', ''),
                     'duration_seconds': duration_seconds,
-                    'duration_formatted': format_duration(duration_seconds)
+                    'duration_decimal': calculate_duration_decimal(duration_seconds)
                 })
+            else:
+                print(f"DEBUG: Video is 5 minutes or shorter, skipping")
         
         print(f"Found {len(valid_videos)} videos longer than 5 minutes")
         return valid_videos
         
     except HttpError as e:
         print(f"Error fetching videos for channel {channel_id}: {e}")
+        print(f"DEBUG: YouTube API error details: {e}")
         return []
     except Exception as e:
         print(f"An unexpected error occurred while fetching videos for channel {channel_id}: {e}")
+        print(f"DEBUG: Full error details: {type(e).__name__}: {str(e)}")
         return []
 
 def add_videos_to_notion_batch(videos):
@@ -249,6 +306,7 @@ def add_videos_to_notion_batch(videos):
     url = "https://api.notion.com/v1/pages"
     
     for video in videos:
+        print(f"DEBUG: Preparing to add video: {video['title']}")
         data = {
             "parent": {"database_id": NOTION_DB_ID},
             "properties": {
@@ -256,26 +314,43 @@ def add_videos_to_notion_batch(videos):
                 "URL": {"url": f"https://www.youtube.com/watch?v={video['video_id']}"},
                 "Channel": {"rich_text": [{"text": {"content": video['channel_title']}}]},
                 "Date": {"date": {"start": video['published_at']}},
-                "Length": {"rich_text": [{"text": {"content": video['duration_formatted']}}]}
+                "Length": {"number": video['duration_decimal']}
             }
         }
         
+        print(f"DEBUG: Notion payload: {json.dumps(data, indent=2)}")
+        
         try:
             response = session.post(url, json=data)
+            print(f"DEBUG: Notion response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"DEBUG: Notion error response: {response.text}")
+                
             response.raise_for_status()
             success_count += 1
-            print(f"✅ Added: {video['title'][:50]}... ({video['duration_formatted']})" if len(video['title']) > 50 else f"✅ Added: {video['title']} ({video['duration_formatted']})")
+            print(f"✅ Added: {video['title'][:50]}... ({video['duration_decimal']} min)" if len(video['title']) > 50 else f"✅ Added: {video['title']} ({video['duration_decimal']} min)")
         except requests.exceptions.RequestException as e:
             failed_count += 1
             print(f"❌ Failed: {video['title'][:50]}..." if len(video['title']) > 50 else f"❌ Failed: {video['title']}")
             print(f"   Error: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"   Response text: {e.response.text}")
     
     return success_count, failed_count
 
 def main():
     """
     Main function to orchestrate fetching videos and adding them to Notion.
+    OPTIMIZED for lower API quota usage.
     """
+    print("DEBUG: Starting main function...")
+    
+    # Debug environment variables
+    print(f"DEBUG: YOUTUBE_API_KEY present: {bool(YOUTUBE_API_KEY)}")
+    print(f"DEBUG: NOTION_TOKEN present: {bool(NOTION_TOKEN)}")
+    print(f"DEBUG: NOTION_DB_ID: {NOTION_DB_ID}")
+    
     # Validate that all required environment variables are set
     if not YOUTUBE_API_KEY:
         print("Error: YOUTUBE_API_KEY environment variable not found. Please set it.")
@@ -288,28 +363,42 @@ def main():
         return
 
     # Initialize the YouTube API service
-    youtube_service = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+    try:
+        print("DEBUG: Initializing YouTube API service...")
+        youtube_service = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+        print("DEBUG: YouTube API service initialized successfully")
+    except Exception as e:
+        print(f"ERROR: Failed to initialize YouTube API: {e}")
+        return
 
     # Check if any channel IDs were loaded
     if not CHANNEL_IDS:
         print("No channel IDs loaded. Please ensure 'channels.txt' exists and contains channel IDs.")
         return
 
-    # Get existing video IDs to prevent duplicates
+    # OPTIMIZATION 4: Get existing video IDs only once and reuse
     print("Retrieving existing videos from Notion database...")
     existing_video_ids = get_existing_video_ids()
 
     total_success = 0
     total_failed = 0
+    api_calls_made = 0
 
-    # Process each channel
-    for channel_id in CHANNEL_IDS:
-        print(f"\n--- Processing channel: {channel_id} ---")
+    # Process each channel with rate limiting
+    for i, channel_id in enumerate(CHANNEL_IDS):
+        print(f"\n--- Processing channel {i+1}/{len(CHANNEL_IDS)}: {channel_id} ---")
+        
+        # OPTIMIZATION 5: Add small delay between channels to avoid rate limits
+        if i > 0:
+            print("DEBUG: Adding delay between channels to respect rate limits...")
+            time.sleep(1)  # 1 second delay between channels
         
         # Get new videos (>5 minutes, not in database)
         videos = get_last_24h_videos_with_duration(youtube_service, channel_id, existing_video_ids)
-
+        api_calls_made += 2  # channels().list + playlistItems().list
+        
         if videos:
+            api_calls_made += 1  # videos().list call
             print(f"Adding {len(videos)} new videos to Notion...")
             success, failed = add_videos_to_notion_batch(videos)
             total_success += success
@@ -324,6 +413,9 @@ def main():
     print(f"\n=== Summary ===")
     print(f"✅ Successfully added: {total_success} videos")
     print(f"❌ Failed to add: {total_failed} videos")
+    print(f"🔧 API calls made: ~{api_calls_made} (estimated)")
+    print(f"💰 Quota used: ~{api_calls_made * 1} units (playlist method) vs ~{len(CHANNEL_IDS) * 100} units (search method)")
+    print(f"📊 Quota saved: ~{(len(CHANNEL_IDS) * 100) - api_calls_made} units ({((len(CHANNEL_IDS) * 100 - api_calls_made) / (len(CHANNEL_IDS) * 100)) * 100:.1f}% reduction)")
 
 if __name__ == "__main__":
     main()
