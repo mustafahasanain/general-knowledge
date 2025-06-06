@@ -188,7 +188,6 @@ def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_vide
             part='snippet',
             playlistId=uploads_playlist_id,
             maxResults=10,  # Reduced from 50 to 10 to save quota
-            order='date'
         )
         playlist_response = playlist_request.execute()
         
