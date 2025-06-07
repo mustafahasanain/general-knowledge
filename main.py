@@ -36,6 +36,107 @@ def load_channel_ids():
 # Load channel IDs globally when the script starts
 CHANNEL_IDS = load_channel_ids()
 
+def get_channel_type_mappings():
+    """
+    Retrieves channel-to-type mappings from the Notion database by looking at 
+    entries from the previous week that have both Channel and Type properties set.
+    
+    Returns:
+        dict: A dictionary mapping channel names to their types.
+    """
+    print("DEBUG: Starting to fetch channel-type mappings from previous week...")
+    channel_type_map = {}
+    has_more = True
+    next_cursor = None
+    
+    # Calculate date range for the previous week
+    now = datetime.now(timezone.utc)
+    one_week_ago = now - timedelta(days=7)
+    
+    while has_more:
+        url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
+        headers = {
+            "Authorization": f"Bearer {NOTION_TOKEN}",
+            "Content-Type": "application/json",
+            "Notion-Version": "2022-06-28"
+        }
+        
+        # Filter for entries from the previous week
+        payload = {
+            "page_size": 100,
+            "filter": {
+                "and": [
+                    {
+                        "property": "Date",
+                        "date": {
+                            "on_or_after": one_week_ago.strftime('%Y-%m-%d')
+                        }
+                    },
+                    {
+                        "property": "Type",
+                        "select": {
+                            "is_not_empty": True
+                        }
+                    },
+                    {
+                        "property": "Channel",
+                        "rich_text": {
+                            "is_not_empty": True
+                        }
+                    }
+                ]
+            }
+        }
+        
+        if next_cursor:
+            payload["start_cursor"] = next_cursor
+        
+        try:
+            print(f"DEBUG: Making request to Notion API for channel-type mappings...")
+            response = requests.post(url, json=payload, headers=headers)
+            print(f"DEBUG: Notion API response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"DEBUG: Notion API error response: {response.text}")
+                
+            response.raise_for_status()
+            data = response.json()
+            
+            print(f"DEBUG: Found {len(data.get('results', []))} pages with type mappings in this batch")
+            
+            # Extract channel-type mappings
+            for page in data.get('results', []):
+                properties = page.get('properties', {})
+                
+                # Get channel name
+                channel_property = properties.get('Channel', {})
+                channel_name = None
+                if channel_property.get('type') == 'rich_text' and channel_property.get('rich_text'):
+                    channel_name = channel_property['rich_text'][0].get('text', {}).get('content', '').strip()
+                
+                # Get type
+                type_property = properties.get('Type', {})
+                type_value = None
+                if type_property.get('type') == 'select' and type_property.get('select'):
+                    type_value = type_property['select'].get('name', '').strip()
+                
+                # Store mapping if both channel and type are present
+                if channel_name and type_value:
+                    channel_type_map[channel_name] = type_value
+                    print(f"DEBUG: Found mapping: '{channel_name}' -> '{type_value}'")
+            
+            has_more = data.get('has_more', False)
+            next_cursor = data.get('next_cursor')
+            
+        except Exception as e:
+            print(f"Error retrieving channel-type mappings: {e}")
+            print(f"DEBUG: Full error details: {type(e).__name__}: {str(e)}")
+            break
+    
+    print(f"Found {len(channel_type_map)} channel-type mappings from previous week")
+    print(f"DEBUG: Channel-type mappings: {channel_type_map}")
+    return channel_type_map
+
 def get_existing_video_ids():
     """
     Retrieves all existing video IDs from the Notion database to prevent duplicates.
@@ -277,12 +378,13 @@ def get_last_24h_videos_with_duration(youtube_service, channel_id, existing_vide
         print(f"DEBUG: Full error details: {type(e).__name__}: {str(e)}")
         return []
 
-def add_videos_to_notion_batch(videos):
+def add_videos_to_notion_batch(videos, channel_type_mappings):
     """
-    Adds multiple videos to Notion database efficiently.
+    Adds multiple videos to Notion database efficiently with automatic type assignment.
     
     Args:
         videos (list): List of video dictionaries to add.
+        channel_type_mappings (dict): Dictionary mapping channel names to types.
     
     Returns:
         tuple: (success_count, failed_count)
@@ -306,15 +408,32 @@ def add_videos_to_notion_batch(videos):
     
     for video in videos:
         print(f"DEBUG: Preparing to add video: {video['title']}")
+        
+        # Determine type based on channel mapping
+        channel_name = video['channel_title']
+        video_type = channel_type_mappings.get(channel_name)
+        
+        if video_type:
+            print(f"DEBUG: Found type mapping for '{channel_name}' -> '{video_type}'")
+        else:
+            print(f"DEBUG: No type mapping found for '{channel_name}', leaving Type empty")
+        
+        # Prepare properties
+        properties = {
+            "Title": {"title": [{"text": {"content": video['title']}}]},
+            "URL": {"url": f"https://www.youtube.com/watch?v={video['video_id']}"},
+            "Channel": {"rich_text": [{"text": {"content": video['channel_title']}}]},
+            "Date": {"date": {"start": video['published_at']}},
+            "Length": {"number": video['duration_decimal']}
+        }
+        
+        # Add Type property only if we have a mapping for this channel
+        if video_type:
+            properties["Type"] = {"select": {"name": video_type}}
+        
         data = {
             "parent": {"database_id": NOTION_DB_ID},
-            "properties": {
-                "Title": {"title": [{"text": {"content": video['title']}}]},
-                "URL": {"url": f"https://www.youtube.com/watch?v={video['video_id']}"},
-                "Channel": {"rich_text": [{"text": {"content": video['channel_title']}}]},
-                "Date": {"date": {"start": video['published_at']}},
-                "Length": {"number": video['duration_decimal']}
-            }
+            "properties": properties
         }
         
         print(f"DEBUG: Notion payload: {json.dumps(data, indent=2)}")
@@ -328,7 +447,8 @@ def add_videos_to_notion_batch(videos):
                 
             response.raise_for_status()
             success_count += 1
-            print(f"✅ Added: {video['title'][:50]}... ({video['duration_decimal']} min)" if len(video['title']) > 50 else f"✅ Added: {video['title']} ({video['duration_decimal']} min)")
+            type_info = f" [Type: {video_type}]" if video_type else " [Type: Empty]"
+            print(f"✅ Added: {video['title'][:50]}... ({video['duration_decimal']} min){type_info}" if len(video['title']) > 50 else f"✅ Added: {video['title']} ({video['duration_decimal']} min){type_info}")
         except requests.exceptions.RequestException as e:
             failed_count += 1
             print(f"❌ Failed: {video['title'][:50]}..." if len(video['title']) > 50 else f"❌ Failed: {video['title']}")
@@ -341,7 +461,7 @@ def add_videos_to_notion_batch(videos):
 def main():
     """
     Main function to orchestrate fetching videos and adding them to Notion.
-    OPTIMIZED for lower API quota usage.
+    OPTIMIZED for lower API quota usage with automatic type assignment.
     """
     print("DEBUG: Starting main function...")
     
@@ -375,7 +495,11 @@ def main():
         print("No channel IDs loaded. Please ensure 'channels.txt' exists and contains channel IDs.")
         return
 
-    # OPTIMIZATION 4: Get existing video IDs only once and reuse
+    # Get channel-type mappings from previous week
+    print("Retrieving channel-type mappings from previous week...")
+    channel_type_mappings = get_channel_type_mappings()
+
+    # Get existing video IDs only once and reuse
     print("Retrieving existing videos from Notion database...")
     existing_video_ids = get_existing_video_ids()
 
@@ -387,7 +511,7 @@ def main():
     for i, channel_id in enumerate(CHANNEL_IDS):
         print(f"\n--- Processing channel {i+1}/{len(CHANNEL_IDS)}: {channel_id} ---")
         
-        # OPTIMIZATION 5: Add small delay between channels to avoid rate limits
+        # Add small delay between channels to avoid rate limits
         if i > 0:
             print("DEBUG: Adding delay between channels to respect rate limits...")
             time.sleep(1)  # 1 second delay between channels
@@ -399,7 +523,7 @@ def main():
         if videos:
             api_calls_made += 1  # videos().list call
             print(f"Adding {len(videos)} new videos to Notion...")
-            success, failed = add_videos_to_notion_batch(videos)
+            success, failed = add_videos_to_notion_batch(videos, channel_type_mappings)
             total_success += success
             total_failed += failed
             
@@ -412,6 +536,7 @@ def main():
     print(f"\n=== Summary ===")
     print(f"✅ Successfully added: {total_success} videos")
     print(f"❌ Failed to add: {total_failed} videos")
+    print(f"📋 Channel-type mappings used: {len(channel_type_mappings)}")
     print(f"🔧 API calls made: ~{api_calls_made} (estimated)")
     print(f"💰 Quota used: ~{api_calls_made * 1} units (playlist method) vs ~{len(CHANNEL_IDS) * 100} units (search method)")
     print(f"📊 Quota saved: ~{(len(CHANNEL_IDS) * 100) - api_calls_made} units ({((len(CHANNEL_IDS) * 100 - api_calls_made) / (len(CHANNEL_IDS) * 100)) * 100:.1f}% reduction)")
