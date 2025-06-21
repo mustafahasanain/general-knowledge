@@ -2,7 +2,7 @@ name: General Knowledge
 
 on:
   schedule:
-    - cron: "0 21 * * *" # Runs every day at 12:00 AM Iraq time (21:00 UTC)
+    - cron: "0 21 * * 0-4,6" # Runs every day (excluding Friday) at 12:00 AM Iraq time (21:00 UTC)
   workflow_dispatch: # Allows manual trigger from GitHub UI
 
 jobs:
